@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Deep Time Atlas</title>
+<style>
+  :root { --bg: #0d1117; --panel: #161b22; --line: #2a313b; --ink: #e6e1d6; --dim: #9aa3ad; --gold: #e8c547; --bad: #ff8a80; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink); }
+  body { display: flex; align-items: center; justify-content: center; padding: 16px;
+    font: 17px/1.5 Georgia, "Times New Roman", serif; }
+  .card { width: 100%; max-width: 24rem; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 28px 24px; }
+  h1 { margin: 0 0 4px; font-size: 1.6rem; font-weight: normal; letter-spacing: .02em; }
+  .sub { margin: 0 0 22px; color: var(--dim); font-size: .95rem; }
+  label { display: block; font-size: .9rem; color: var(--dim); margin-bottom: 6px; }
+  input[type=password] { width: 100%; font: inherit; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--ink); }
+  input[type=password]:focus { outline: 2px solid var(--gold); outline-offset: 1px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; }
+  .rem { display: flex; align-items: center; gap: 6px; font-size: .9rem; color: var(--dim); margin: 0; }
+  button { font: inherit; padding: 9px 20px; border: 0; border-radius: 8px; background: var(--gold); color: #1a1a1a; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  #msg { min-height: 1.5em; margin: 14px 0 0; font-size: .92rem; color: var(--dim); }
+  #msg.bad { color: var(--bad); }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>Deep Time Atlas</h1>
+  <p class="sub">All of human history on one map.</p>
+  <form id="f" class="hidden" autocomplete="on">
+    <input type="text" name="username" value="deep-time-atlas" autocomplete="username" class="hidden" aria-hidden="true" tabindex="-1">
+    <label for="pw">Password</label>
+    <input id="pw" type="password" autocomplete="current-password" required>
+    <div class="row">
+      <label class="rem"><input id="rem" type="checkbox" checked> Remember on this device</label>
+      <button id="go" type="submit">Open</button>
+    </div>
+  </form>
+  <p id="msg" role="status" aria-live="polite">Opening&hellip;</p>
+</main>
+<script>
+// Round 25: the Atlas is published only as ciphertext (tools/site_encrypt.py). This page derives the key from the
+// password (typed, from the link's #k=..., or remembered), decrypts the Atlas and writes it into this document; the
+// Atlas then fetches its audio through window.DTA_FETCH, which decrypts each file. Everything here is inside one
+// function: document.open keeps this window's global scope, so a top-level const here would clash with the Atlas's own.
+(() => {
+const META = {"v": 1, "salt": "0c1c91f137d2395d8be965077482e53e", "iter": 600000, "page": 7939415};
+const $ = id => document.getElementById(id), msg = $('msg'), form = $('f');
+const STORE = 'dta-site-pw';
+const hex = h => new Uint8Array(h.match(/../g).map(x => parseInt(x, 16)));
+const say = (t, bad) => { msg.textContent = t; msg.classList.toggle('bad', !!bad); };
+const mb = n => (n / 1e6).toFixed(1);
+let page = null;   // the encrypted page, downloading in the background from the start
+
+function download(){
+  return fetch('atlas.enc', {cache: 'no-cache'}).then(async r => {
+    if (!r.ok) throw new Error('atlas ' + r.status);
+    if (!r.body || !r.body.getReader) return new Uint8Array(await r.arrayBuffer());
+    const rd = r.body.getReader(), parts = []; let got = 0;
+    for (;;){ const {done, value} = await rd.read(); if (done) break; parts.push(value); got += value.length;
+      if (window.dtaWaiting) say('Opening… ' + mb(got) + ' of ' + mb(META.page) + ' MB'); }
+    const all = new Uint8Array(got); let o = 0; for (const p of parts){ all.set(p, o); o += p.length; } return all;
+  });
+}
+async function rawKey(pw){
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({name: 'PBKDF2', hash: 'SHA-256', salt: hex(META.salt), iterations: META.iter}, base, 512);
+  return new Uint8Array(bits).slice(0, 32);
+}
+const open1 = (key, b) => crypto.subtle.decrypt({name: 'AES-GCM', iv: b.subarray(0, 12)}, key, b.subarray(12));
+
+async function unlock(pw, remember){
+  say('Checking the password…');
+  const raw = await rawKey(pw), key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt']);
+  const chk = new Uint8Array(await (await fetch('check.enc', {cache: 'no-cache'})).arrayBuffer());
+  try { await open1(key, chk); } catch (e) { return false; }
+  try { if (remember) localStorage.setItem(STORE, pw); else localStorage.removeItem(STORE); } catch (e) {}
+  window.dtaWaiting = true; say('Opening…');
+  const enc = await (page || (page = download()));
+  say('Opening…');
+  let html = new TextDecoder().decode(await open1(key, enc));
+  let b64 = ''; for (let i = 0; i < raw.length; i++) b64 += String.fromCharCode(raw[i]); b64 = btoa(b64);
+  const js = '<script>(function(){var R=Uint8Array.from(atob("' + b64 + '"),function(c){return c.charCodeAt(0)}),K=null;' +
+    'function key(){return K||(K=crypto.subtle.importKey("raw",R,"AES-GCM",false,["decrypt"]))}' +
+    'window.DTA_PW=' + JSON.stringify(pw).replace(/</g, '\\u003c') + ';' +
+    'window.DTA_FETCH=async function(u){var r=await fetch(u+".enc",{cache:"no-cache"});if(!r.ok)return new Response(null,{status:r.status});' +
+    'var b=new Uint8Array(await r.arrayBuffer()),p=await crypto.subtle.decrypt({name:"AES-GCM",iv:b.subarray(0,12)},await key(),b.subarray(12));' +
+    'return new Response(p,{status:200,headers:{"Content-Type":/\\.mp3$/.test(u)?"audio/mpeg":"application/octet-stream"}})};})();<\/script>';
+  const m = html.match(/<head[^>]*>/i);
+  html = m ? html.slice(0, m.index + m[0].length) + js + html.slice(m.index + m[0].length) : js + html;
+  document.open(); document.write(html); document.close();
+  return true;
+}
+
+// the password from the link (#k=..., which never reaches the server), then removed from the address bar
+function fromLink(){
+  const h = location.hash.replace(/^#/, ''); if (!h) return null;
+  const p = new URLSearchParams(h); let pw = p.get('k');
+  if (pw === null && !h.includes('=')) { pw = decodeURIComponent(h); p.delete(h); }
+  if (pw === null) return null;
+  p.delete('k'); const rest = p.toString();
+  history.replaceState(null, '', location.pathname + location.search + (rest ? '#' + rest : ''));
+  return pw;
+}
+function ask(note, bad){ form.classList.remove('hidden'); say(note || '', bad); $('pw').focus(); }
+
+form.addEventListener('submit', async ev => {
+  ev.preventDefault(); const pw = $('pw').value; if (!pw) return;
+  $('go').disabled = true;
+  try { if (!await unlock(pw, $('rem').checked)){ $('go').disabled = false; $('pw').select(); say('That password did not open the Atlas.', true); } }
+  catch (e) { $('go').disabled = false; say('Something went wrong: ' + e.message + '. Try reloading the page.', true); }
+});
+
+(async () => {
+  if (!window.crypto || !crypto.subtle){ say('This browser cannot open the Atlas (it needs a secure https connection and a current browser).', true); return; }
+  page = download(); page.catch(() => {});
+  let pw = fromLink(), stored = null; try { stored = localStorage.getItem(STORE); } catch (e) {}
+  try {
+    if (pw !== null){ if (await unlock(pw, true)) return; ask('The password in that link did not work. Type it here.', true); return; }
+    if (stored){ if (await unlock(stored, true)) return; try { localStorage.removeItem(STORE); } catch (e) {} ask('The password has changed. Type the new one.', true); return; }
+    ask();
+  } catch (e) { ask('Something went wrong: ' + e.message + '. Try reloading the page.', true); }
+})();
+})();
+</script>
+</body>
+</html>
